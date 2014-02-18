@@ -1,4 +1,3 @@
-
 #include "mpi.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -10,14 +9,16 @@
 int main (int argc, char* argv[])
 {
         const int PAS=N*N/NPRINT;
-	int rang, nbProcs, nbLignes, iLig, iCol, iProc, i;
+	int rang, nbProcs, nbLignes, iLig, iCol, iProc, i, aux;
 	float * A = malloc(N*N*sizeof(float));
 	float * B = malloc(N*N*sizeof(float));
 	float * C = malloc(N*N*sizeof(float));
 	float * verif = malloc(N*N*sizeof(float));
-
-	float *lignesA, *colonnesB, *monResultat;
-	double temps_debut,temps_debut1,temps_debut2, temps_fin, temps_fin1, temps_fin2;
+	float *lignesA, *colonnesB, *monResultat, *m, *lignesA1[3];//*lignesA1, *lignesA2, *lignesA3;
+	double inittime,totaltime,recvtime;
+	
+	MPI_Status status[3];
+	MPI_Request send_request[3], recv_request[3];
 	
 	srand(time(NULL));
 	
@@ -25,18 +26,6 @@ int main (int argc, char* argv[])
 	
 	MPI_Comm_size(MPI_COMM_WORLD, &nbProcs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rang);
-	if (nbProcs < 4)
-	{
-		printf("Doit être exécuté dans 4 processus !\n");
-		exit(EXIT_FAILURE);
-	}
-	
-	MPI_Comm_rank(MPI_COMM_WORLD, &rang);
-	if (rang >= 4)
-	{
-		MPI_Finalize();
-		return EXIT_SUCCESS;
-	}
 
 	if (rang == 0)
 	{
@@ -47,12 +36,9 @@ int main (int argc, char* argv[])
 			{
 				A[iLig * N + iCol] = rand()%100;
 				B[iLig * N + iCol] = rand()%100;
-				//A[iLig * N + iCol] = iCol-iLig;
-				//B[iLig * N + iCol] = iCol-iLig;
 			}
 		}
-
-		temps_debut = MPI_Wtime();
+		
 		/* Calcul du produit, pour vérification ultérieure */
 		for (iLig = 0; iLig < N; iLig++)
 		{
@@ -65,13 +51,15 @@ int main (int argc, char* argv[])
 				}
 			}
 		}
-		temps_fin = MPI_Wtime();
-		printf("Temps de calcul de la vérification: %6.3f\n",temps_fin-temps_debut);
 	}
 	
 	/* Combien de lignes et colonnes par processus ? */
 	nbLignes = N / nbProcs;
 	lignesA = malloc(nbLignes * N * sizeof(float));
+	//lignesA1 = malloc(nbLignes * N * sizeof(float));
+	lignesA1[0] = malloc(nbLignes * N * sizeof(float));
+	lignesA1[1] = malloc(nbLignes * N * sizeof(float));
+	lignesA1[2] = malloc(nbLignes * N * sizeof(float));
 	colonnesB = malloc(nbLignes * N * sizeof(float));
 	monResultat = malloc(nbLignes * N * sizeof(float));
 	
@@ -86,50 +74,72 @@ int main (int argc, char* argv[])
 			}
 		}
 	}
+	
+	
 	MPI_Scatter(C, N * nbLignes, MPI_FLOAT, colonnesB, N * nbLignes, MPI_FLOAT, 0, MPI_COMM_WORLD);
+	MPI_Scatter(A, N * nbLignes, MPI_FLOAT, lignesA, N * nbLignes, MPI_FLOAT, 0, MPI_COMM_WORLD);
+	
+	MPI_Isend(lignesA,N * nbLignes, MPI_FLOAT, (rang+1)%4,0,MPI_COMM_WORLD,&send_request[0]);
+	MPI_Isend(lignesA,N * nbLignes, MPI_FLOAT, (rang+2)%4,0,MPI_COMM_WORLD,&send_request[1]); 
+	MPI_Isend(lignesA,N * nbLignes, MPI_FLOAT, (rang+3)%4,0,MPI_COMM_WORLD,&send_request[2]);
+	
+ 	MPI_Irecv(lignesA1[0],N * nbLignes, MPI_FLOAT, (rang+3)%4,0,MPI_COMM_WORLD,&recv_request[0]);
+	MPI_Irecv(lignesA1[1],N * nbLignes, MPI_FLOAT, (rang+2)%4,0,MPI_COMM_WORLD,&recv_request[1]);
+	MPI_Irecv(lignesA1[2],N * nbLignes, MPI_FLOAT, (rang+1)%4,0,MPI_COMM_WORLD,&recv_request[2]);
+	
+	inittime = MPI_Wtime();
+	
+	aux = rang;
+	for (iLig = 0; iLig < nbLignes; iLig++)
+		{
+			for (iCol = 0; iCol < nbLignes; iCol++)
+			{
+				monResultat[aux * nbLignes + iCol * N + iLig] = 0;
+				for (i = 0; i < N; i++)
+				{
+					monResultat[aux * nbLignes + iCol * N + iLig] += lignesA[iLig * N + i] * colonnesB[iCol * N + i];
+				}
+			}
+		}
+	
 	
 	/* Calcul des produits */
-	temps_debut= MPI_Wtime();
-///////////////////////////////////////////////////////////////////////////////
-	for (iProc = 0; iProc < nbProcs; iProc++)
-	{
-	temps_debut1= MPI_Wtime();
-		/* Le proc 0 transmet les nbLignes lignes suivantes de A */
-		
-		if (rang == 0)
-		{
-			memcpy(lignesA, &(A[iProc * nbLignes * N]), N * nbLignes * sizeof(float));
-		}
-	MPI_Bcast(lignesA, N*nbLignes, MPI_FLOAT, 0, MPI_COMM_WORLD);
-	temps_fin1= MPI_Wtime()- temps_debut1;
-
-	if(rang==0)
-		printf("Temps mis pour broadcast :%6.3f secondes \n", rang,iProc, temps_fin1);
-		
-		temps_debut2= MPI_Wtime();
+	for (iProc = 0; iProc < nbProcs-1; iProc++)
+	{	
+		  MPI_Wait(&send_request[iProc],&status[iProc]);
+		  MPI_Wait(&recv_request[iProc],&status[iProc]);
+		  m = lignesA;
+ 		  lignesA = lignesA1[iProc];
+ 		  lignesA1[iProc] = m;
+		  
+		aux=(rang + 3 - iProc )%4;
 		/* Chaque proc calcul le bloc (iProc,rang) */
 		for (iLig = 0; iLig < nbLignes; iLig++)
 		{
 			for (iCol = 0; iCol < nbLignes; iCol++)
 			{
-				monResultat[iProc * nbLignes + iCol * N + iLig] = 0;
+				monResultat[aux * nbLignes + iCol * N + iLig] = 0;
 				for (i = 0; i < N; i++)
 				{
-					monResultat[iProc * nbLignes + iCol * N + iLig] += lignesA[iLig * N + i] * colonnesB[iCol * N + i];
+					monResultat[aux * nbLignes + iCol * N + iLig] += lignesA[iLig * N + i] * colonnesB[iCol * N + i];
 				}
 			}
 		}
-		temps_fin2= MPI_Wtime()- temps_debut2;
-		printf("Temps mis pour calculer par le processus %d , au cours de l'iteration %d est  :%6.3f secondes \n", rang,iProc, temps_fin2);
+		
+// 		if(iProc < 3)
+// 		{
+// 		  m = lignesA;
+// 		  lignesA = lignesA1[iProc];
+// 		  lignesA1[iProc] = m;
+// 		}
 	}
-
-	MPI_Barrier(MPI_COMM_WORLD);
-///////////////////////////////////////////////////////////////////////////////
-	temps_fin= MPI_Wtime()- temps_debut;
-	if(rang==0)	
- 		printf("Temps mis pour calculer est  :%6.3f secondes \n", temps_fin);
-	
 	/* Récupération du résultat : chaque proc dispose de la colonne rang dans la variable monResultat */
+	MPI_Barrier(MPI_COMM_WORLD);	
+	recvtime = MPI_Wtime();
+	totaltime = recvtime - inittime;
+	if(rang==0)
+		printf ("Your calculations took %.6lf in seconds to run, rANK: %d.\n", totaltime, rang );
+		
 	MPI_Gather(monResultat, nbLignes*N, MPI_FLOAT, C, nbLignes*N, MPI_FLOAT, 0, MPI_COMM_WORLD);
 	
 	/* Le résultat est transposé, il faut le réinverser */
@@ -150,14 +160,14 @@ int main (int argc, char* argv[])
 		for (i = 0; i < N*N; i+=PAS)
 		{
 				if (i % 8 == 0) printf("\n");
-				printf("%f ", C[i]);
+				printf("%d ", C[i]);
 		}
 		
 		printf("\n\nSolution recherchée :");
 		for (i = 0; i < N*N; i+=PAS)
 		{
 			if (i % N == 0) printf("\n");
-			printf("%f ", verif[i]);
+			printf("%d ", verif[i]);
 		}
 		
 		printf("\n\nErreurs :\n");
